@@ -441,12 +441,13 @@ class SQLiteAnalyzer(object):
             elif content == CellContent.PAYLOAD:
                 cellInfo["payload"]["offset"] = offset
                 (headerSize, bodySize,
-                 payloadSizeInCell) = self._getPayloadFromCell(
+                 payloadSizeInCell, data) = self._getPayloadFromCell(
                     pageNum, offset)
                 offset += payloadSizeInCell
                 cellSize += payloadSizeInCell
                 cellInfo["payload"]["headerSize"] = headerSize
                 cellInfo["payload"]["bodySize"] = bodySize
+                cellInfo["payload"]["data"] = data
                 assert payloadSize == headerSize + bodySize
 
             elif content == CellContent.OVERFLOW_PAGE_HEAD:
@@ -488,9 +489,9 @@ class SQLiteAnalyzer(object):
         return _varint2int_bigendian(ridVarint)
 
     def _getPayloadFromCell(self, pageNum, offset):
-        (headerSize, bodySize) = self._getWholePayloadSize(pageNum, offset)
+        (headerSize, bodySize, data) = self._getWholePayload(pageNum, offset)
         payloadSizeInCell = self._getPayloadSizeInCell(headerSize + bodySize)
-        return (headerSize, bodySize, payloadSizeInCell)
+        return (headerSize, bodySize, payloadSizeInCell, data)
 
     def _getOverflowPageHeadFromCell(self, pageNum, offset,
                                      payloadSize, payloadSizeInCell):
@@ -566,7 +567,7 @@ class SQLiteAnalyzer(object):
         sizeInThisPage = minLocal if localSize > maxLocal else localSize
         return sizeInThisPage
 
-    def _getWholePayloadSize(self, pageNum, payloadOffset):
+    def _getWholePayload(self, pageNum, payloadOffset):
         """
         @note
         See: README.org - Read payloads
@@ -589,14 +590,20 @@ class SQLiteAnalyzer(object):
         # Read serial type in header and calculate bodySize
         bodySize = 0
         stypeOffset = headerSizeLen
+        data = []
         while stypeOffset < headerSize:
             stypeVarint = payloadData[stypeOffset:
                                        stypeOffset + varintMaxLen]
             (stypeLen, stype) = _varint2int_bigendian(stypeVarint)
-            bodySize += DbFormatConfig.serialType2ContentSize(stype)
+            recLen = DbFormatConfig.serialType2ContentSize(stype)
+            rawRec = payloadData[headerSize + bodySize:
+                                  headerSize + bodySize + recLen]
+            rec = extractData(stype, rawRec)
+            data.append(rec)
+            bodySize += recLen
             stypeOffset += stypeLen
 
-        return headerSize, bodySize
+        return headerSize, bodySize, data
 
     def _read_overflow_pages(self, pageNum, rem_len):
         assert 1 <= pageNum <= self._dbinfo["dbMetadata"]["nPages"]
@@ -775,7 +782,6 @@ def _binstr2int_bigendian(binstr):
         ret += ord(byte) * pow(256, n_dig)
     return ret
 
-
 def _varint2int_bigendian(binstr):
     """
     @note
@@ -813,6 +819,30 @@ def _varint2int_bigendian(binstr):
                 break
     s01 = s01.replace(' ', '0')
     return (i + 1, int(s01, 2))
+
+def extractData(stype, raw):
+    if stype == 0:
+        return None
+    # big endian integers are trivially decoded without struct
+    elif stype >= 1 and stype <= 6:
+        return _binstr2int_bigendian(raw)
+    # uh, need to use struct for this
+    # TODO: decode floats
+    elif stype == 7:
+        return '(float)'
+    elif stype == 8:
+        return 0
+    elif stype == 9:
+        return 1
+    elif stype >= 12 and stype % 2 == 0:
+        if len(raw) < 16:
+            return [ord(x) for x in raw]
+        else:
+            return 'blob:%d' % (len(raw),)
+    elif stype >= 13 and stype % 2 == 1:
+        return raw.decode('utf-8')
+    else:
+        assert False
 
 
 def _getSqliteString(data):
